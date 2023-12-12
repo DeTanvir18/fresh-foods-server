@@ -1,0 +1,327 @@
+const express = require('express');
+const app = express();
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+require('dotenv').config();
+const port = process.env.PORT || 5000;
+
+// middlewares
+app.use(
+    cors({
+        origin: ['http://localhost:5173',
+            'http://localhost:5174',
+            'https://assign12-fresh-foods.web.app'
+        ],
+        credentials: true,
+    }),
+)
+app.use(express.json());
+
+
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.tl5czkc.mongodb.net/?retryWrites=true&w=majority`;
+
+// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+const client = new MongoClient(uri, {
+    serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+    }
+});
+
+async function run() {
+    try {
+        // Connect the client to the server	(optional starting in v4.7)
+        // await client.connect();
+        const mealCollection = client.db('freshFoodDb').collection('meals');
+        const userCollection = client.db('freshFoodDb').collection('users');
+        const cartCollection = client.db('freshFoodDb').collection('cart');
+        const reviewCollection = client.db('freshFoodDb').collection('reviews');
+
+
+        // 
+        // 
+        // jwt related api
+        // 
+        app.post('/jwt', async (req, res) => {
+            const user = req.body;
+            const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
+            res.send({ token });
+        })
+
+
+        // middlewares 
+        const verifyToken = (req, res, next) => {
+            // console.log('inside verify token', req.headers.authorization);
+            if (!req.headers.authorization) {
+                return res.status(401).send({ message: 'unauthorized access' });
+            }
+            const token = req.headers.authorization.split(' ')[1];
+            jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+                if (err) {
+                    return res.status(401).send({ message: 'unauthorized access' })
+                }
+                req.decoded = decoded;
+                next();
+            })
+        }
+        // use verify admin after verifyToken
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.decoded.email;
+            const query = { email: email };
+            const user = await userCollection.findOne(query);
+            const isAdmin = user?.role === 'admin';
+            if (!isAdmin) {
+                return res.status(403).send({ message: 'forbidden access' });
+            }
+            next();
+        }
+
+
+
+
+        // 
+        // meals related data
+        // 
+        // to get all the meals
+        app.get('/meals', async (req, res) => {
+            const result = await mealCollection.find().toArray();
+            res.send(result);
+        })
+        // to get a specific meal
+        app.get('/mealdetails/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) }
+            const result = await mealCollection.findOne(query);
+            res.send(result);
+        })
+        // for adding a meal by admin
+        app.post('/meals', verifyToken, verifyAdmin, async (req, res) => {
+            const meal = req.body;
+            const result = await mealCollection.insertOne(meal);
+            res.send(result);
+        });
+        // to increase the number of likes when anyone likes a meal
+        app.post('/meals/likes/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const result = await mealCollection.updateOne(query, { $inc: { likeCount: 1 } });
+            res.send(result);
+        })
+        // for publish a meal
+        app.patch('/meals/:id', verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const filter = { _id: new ObjectId(id) };
+            const updatedDoc = {
+                $set: {
+                    status: 'approved'
+                }
+            }
+            const result = await mealCollection.updateOne(filter, updatedDoc);
+            res.send(result);
+        })
+        // for updating menu
+        app.patch('/meals/update/:id', async (req, res) => {
+            const meal = req.body;
+            const id = req.params.id;
+            const filter = { _id: new ObjectId(id) }
+            const updatedDoc = {
+                $set: {
+                    title: meal.title,
+                    category: meal.category,
+                    price: meal.price,
+                    ingredients: meal.ingredients,
+                    description: meal.description,
+                    postDate: meal.postDate,
+                    img: meal.img,
+                    rating: meal.rating
+                }
+            }
+            const result = await mealCollection.updateOne(filter, updatedDoc)
+            res.send(result);
+        })
+        // for deleting a meal by admin
+        app.delete('/meals/:id', verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) }
+            const result = await mealCollection.deleteOne(query);
+            res.send(result);
+        })
+
+
+        // 
+        // users related api
+        // 
+        // for getting all users
+        app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+            const result = await userCollection.find().toArray();
+            res.send(result);
+        });
+        // to get specific user info
+        app.get('/users/:id', async (req, res) => {
+            const email = req.params.id;
+            const query = { email: email };
+            const result = await userCollection.find(query).toArray();
+            res.send(result);
+        })
+
+
+        // checks if the user is admin or not(by useAdmin hook)
+        app.get('/users/admin/:email', verifyToken, async (req, res) => {
+            const email = req.params.email;
+
+            if (email !== req.decoded.email) {
+                return res.status(403).send({ message: 'forbidden access' })
+            }
+
+            const query = { email: email };
+            const user = await userCollection.findOne(query);
+            let admin = false;
+            if (user) {
+                admin = user?.role === 'admin';
+            }
+            res.send({ admin });
+        })
+        // for posting/adding individual user
+        app.post('/users', async (req, res) => {
+            const user = req.body;
+            const query = { email: user.email }
+            const existingUser = await userCollection.findOne(query);
+            if (existingUser) {
+                return res.send({ message: 'user already exists', insertedId: null })
+            }
+            const result = await userCollection.insertOne(user);
+            res.send(result);
+        })
+        // for making an user admin
+        app.patch('/users/admin/:id', verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const filter = { _id: new ObjectId(id) };
+            const updatedDoc = {
+                $set: {
+                    role: 'admin'
+                }
+            }
+            const result = await userCollection.updateOne(filter, updatedDoc);
+            res.send(result);
+        })
+        // for deleting an user
+        app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) }
+            const result = await userCollection.deleteOne(query);
+            res.send(result);
+        })
+
+        // 
+        // cart related data
+        // 
+        // to get the entire cart
+        app.get('/carts', async (req, res) => {
+            const result = await cartCollection.find().toArray();
+            res.send(result);
+        })
+        // to get all cart items for specific user
+        app.get('/carts', async (req, res) => {
+            const email = req.query.email;
+            const query = { email: email };
+            const result = await cartCollection.find(query).toArray();
+            res.send(result);
+        })
+        // for adding to cart
+        app.post('/carts', async (req, res) => {
+            const cartItem = req.body;
+            const result = await cartCollection.insertOne(cartItem);
+            res.send(result);
+        })
+        // for serving a meal
+        app.patch('/carts/:id', verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const filter = { _id: new ObjectId(id) };
+            const updatedDoc = {
+                $set: {
+                    status: 'Delivered'
+                }
+            }
+            const result = await cartCollection.updateOne(filter, updatedDoc);
+            res.send(result);
+        })
+        // for delete from cart
+        app.delete('/carts/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const result = await cartCollection.deleteOne(query);
+            res.send(result);
+        })
+
+
+        // 
+        // Review related api
+        // 
+        // to get all the reviews
+        app.get('/reviews', async (req, res) => {
+            const result = await reviewCollection.find().toArray();
+            res.send(result);
+        })
+        // for adding to reviews
+        app.post('/reviews', async (req, res) => {
+            const review = req.body;
+            const result = await reviewCollection.insertOne(review);
+            res.send(result);
+        })
+        // to increase the number of reviews when anyone reviews a meal
+        app.post('/meals/reviews/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const result = await mealCollection.updateOne(query, { $inc: { reviewCount: 1 } });
+            res.send(result);
+        })
+        // to decrease the number of reviews when anyone reviews a meal
+        app.post('/meals/reviews/decrease/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            console.log(query);
+            const result = await mealCollection.updateOne(query, { $inc: { reviewCount: -1 } });
+            res.send(result);
+        })
+        // to update a review
+        app.put('/reviews/update/:id', async (req, res) => {
+            const id = req.params.id;
+            const filter = { _id: new ObjectId(id) }
+            const options = { upsert: true };
+            const updatedReview = req.body;
+
+            const review = {
+                $set: {
+                    review: updatedReview.review
+                }
+            }
+            const result = await reviewCollection.updateOne(filter, review, options);
+            res.send(result);
+        })
+        // for delete a review admin
+        app.delete('/reviews/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const result = await reviewCollection.deleteOne(query);
+            res.send(result);
+        })
+
+        // Send a ping to confirm a successful connection
+        // await client.db("admin").command({ ping: 1 });
+        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    } finally {
+        // Ensures that the client will close when you finish/error
+        // await client.close();
+    }
+}
+run().catch(console.dir);
+
+
+app.get('/', (req, res) => {
+    res.send('Fresh Food is coming');
+})
+app.listen(port, () => {
+    console.log(`Fress Food is coming on port: ${port}`);
+})
